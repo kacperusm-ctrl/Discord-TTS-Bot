@@ -164,6 +164,7 @@ async def tts_worker(guild_id: int):
             voice_client = voice_clients.get(guild_id)
 
             if not voice_client or not voice_client.is_connected():
+                await asyncio.sleep(0.1)
                 continue
 
             # Batch same-author rapid messages
