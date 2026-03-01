@@ -16,8 +16,8 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 # Config
 
 TEXT_CHANNEL_IDS = [
-    1471319865817169921,
-    1473527027280773120
+    1473527027280773120,
+    1471319865817169921
 ]
 
 TTS_PITCH = "+8Hz"
@@ -161,14 +161,13 @@ async def tts_worker(guild_id: int):
 
     while True:
         try:
-            message = await queue.get()
             voice_client = voice_clients.get(guild_id)
 
             if not voice_client or not voice_client.is_connected():
-                queue.task_done()
                 continue
 
             # Batch same-author rapid messages
+            message = await queue.get()
             messages = [message]
             author_id = message.author.id
 
@@ -246,19 +245,21 @@ async def tts_worker(guild_id: int):
                 print(f"[EDGE FAIL - Guild {guild_id}] {e}")
                 continue
 
-            audio_stream = io.BytesIO(audio_bytes)
+            temp_path = f"temp_{guild_id}.mp3"
 
-            source = discord.FFmpegPCMAudio(
-                audio_stream,
-                pipe=True,
-                **FFMPEG_OPTIONS
-            )
+            with open(temp_path, "wb") as f:
+                f.write(audio_bytes)
+
+            source = discord.FFmpegPCMAudio(temp_path)
 
             voice_client.play(source)
 
             while voice_client.is_playing():
-                await asyncio.sleep(0.02)
-
+                await asyncio.sleep(0.5)
+            try:
+                os.remove(temp_path)
+            except FileNotFoundError:
+                pass
         except asyncio.CancelledError:
             break
 
