@@ -1,0 +1,9 @@
+import os
+import discord
+asyncio
+edge_tts
+dotenv
+qlite3
+io
+re
+datetime
