@@ -1,4 +1,3 @@
-import os
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -8,6 +7,7 @@ from dotenv import load_dotenv
 import sqlite3
 import io
 import re
+import os
 from datetime import datetime, timezone
 
 load_dotenv()
@@ -33,6 +33,8 @@ VOICE_MAP = {
     "fr": "fr-FR-HenriNeural",
     "it": "it-IT-ElsaNeural",
     "es": "es-ES-LuisNeural",
+    "de": "de-DE-ConradNeural",
+    "ru": "ru-RU-DmitryNeural",
 }
 
 
@@ -70,6 +72,7 @@ CUSTOM_REPLACEMENTS = {
     "omw": "on my way",
     "smh": "shaking my head",
     "ty": "thanks",
+    "ig": "i guess",
     "rq": "real quick",
     "tysm": "thank you so much",
     "wdym": "what do you mean",
@@ -82,9 +85,11 @@ CUSTOM_REPLACEMENTS = {
     "hc": "high castle",
     "mon": "monastary",
     "regi": "regiment",
+    "engi": "engineer",
     "ft": "fast travel",
     "sgt": "sergeant",
-    "stfu": "shut up",
+    "ikr": "I know right",
+    "atp": "at this point",
 }
 
 # FFmpeg
