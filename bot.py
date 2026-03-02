@@ -38,16 +38,29 @@ VOICE_MAP = {
 }
 
 
-conn = sqlite3.connect("bot.db")
-cursor = conn.cursor()
+# SQlite Database
+def init_db():
+    with sqlite3.connect("bot.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_languages (
+            user_id INTEGER PRIMARY KEY,
+            language TEXT NOT NULL
+        )
+        """)
+        conn.commit()
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS user_languages (
-    user_id INTEGER PRIMARY KEY,
-    language TEXT NOT NULL
-)
-""")
-conn.commit()
+
+init_db()
+
+
+def get_user_language(user_id):
+    with sqlite3.connect("bot.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT language FROM user_languages WHERE user_id = ?",
+                       (user_id,))
+        row = cursor.fetchone()
+        return row[0] if row else "en"
 
 
 async def language_autocomplete(
@@ -60,9 +73,20 @@ async def language_autocomplete(
         if current.lower() in code.lower()
     ][:25]
 
+
+def set_user_language(user_id, code):
+    with sqlite3.connect("bot.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+        INSERT INTO user_languages (user_id, language)
+        VALUES (?, ?)
+        ON CONFLICT(user_id)
+        DO UPDATE SET language=excluded.language
+        """, (user_id, code))
+        conn.commit()
+
+
 # Acronyms
-
-
 CUSTOM_REPLACEMENTS = {
     "rn": "right now",
     "gtg": "got to go",
@@ -237,12 +261,8 @@ async def tts_worker(guild_id: int):
             if len(combined_text) > 2500:
                 combined_text = combined_text[:2500]
 
-            cursor.execute(
-                "SELECT language FROM user_languages WHERE user_id = ?",
-                (author_id,)
-            )
-            row = cursor.fetchone()
-            lang_code = row[0] if row else "en"
+            lang_code = get_user_language(author_id)
+
             voice_name = VOICE_MAP.get(lang_code, VOICE_MAP["en"])
 
             try:
@@ -401,14 +421,7 @@ async def language(interaction: discord.Interaction, code: str):
         )
         return
 
-    cursor.execute("""
-    INSERT INTO user_languages (user_id, language)
-    VALUES (?, ?)
-    ON CONFLICT(user_id)
-    DO UPDATE SET language=excluded.language
-    """, (interaction.user.id, code))
-
-    conn.commit()
+    set_user_language(interaction.user.id, code)
 
     await interaction.response.send_message(
         f"Language set to `{code}`.",
