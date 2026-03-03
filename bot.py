@@ -433,7 +433,6 @@ async def language(interaction: discord.Interaction, code: str):
 async def react_previous(interaction: discord.Interaction, emoji: str):
     channel = interaction.channel
 
-    # Your message then previous
     messages = [msg async for msg in channel.history(limit=2)]
     if len(messages) < 2:
         await interaction.response.send_message(
@@ -441,7 +440,7 @@ async def react_previous(interaction: discord.Interaction, emoji: str):
             ephemeral=True
         )
         return
-    previous_message = messages[1]  # 0 = You, 1 = Previous Msg
+    previous_message = messages[0]
 
     try:
         await previous_message.add_reaction(emoji)
@@ -455,6 +454,14 @@ async def react_previous(interaction: discord.Interaction, emoji: str):
             ephemeral=True)
         print(
             f"[ERROR] API Call Rejected, '{channel}' In '{interaction.guild.name}' By '{interaction.user}' ")
+
+
+@bot.tree.command(name="sync", description="Sync slash commands")
+async def sync(interaction: discord.Interaction):
+    await bot.tree.sync()
+    await interaction.response.send_message("Synced!", ephemeral=True)
+    print(
+        f"[SYNC] Bot Commands Synced, '{interaction.channel}' In '{interaction.guild.name}' By '{interaction.user}' ")
 
 
 # Run
