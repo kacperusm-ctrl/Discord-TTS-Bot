@@ -9,6 +9,7 @@ import io
 import re
 import os
 from datetime import datetime, timezone
+from collections import OrderedDict
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -22,6 +23,34 @@ TEXT_CHANNEL_IDS = [
 
 TTS_PITCH = "+8Hz"
 TTS_RATE = "+5%"
+
+
+# Cache
+
+TTS_CACHE_LIMIT = 100
+tts_cache = OrderedDict()
+
+
+def make_cache_key(text, voice):
+    return (text, voice)
+
+
+def get_cached_tts(key):
+    if key in tts_cache:
+        # Move to end to mark as recently used
+        tts_cache.move_to_end(key)
+        return tts_cache[key]
+    return None
+
+
+def set_cached_tts(key, value):
+    # Insert and evict oldest if limit exceeded
+    tts_cache[key] = value
+    tts_cache.move_to_end(key)
+
+    if len(tts_cache) > TTS_CACHE_LIMIT:
+        tts_cache.popitem(last=False)
+
 
 # Language
 
@@ -118,6 +147,9 @@ CUSTOM_REPLACEMENTS = {
     "pls": "please",
     "prob": "probably",
     "gng": "gang",
+    "ur": "your",
+    "smth": "something",
+    "ik": "i know",
 }
 
 # FFmpeg
@@ -173,6 +205,11 @@ async def process_message_text(message: discord.Message) -> str:
 
 
 async def generate_tts_stream(text: str, voice: str) -> bytes:
+    key = make_cache_key(text, voice)
+    cached = get_cached_tts(key)
+    if cached is not None:
+        return cached
+
     communicate = edge_tts.Communicate(
         text=text,
         voice=voice,
@@ -189,6 +226,8 @@ async def generate_tts_stream(text: str, voice: str) -> bytes:
     if not audio_bytes:
         raise RuntimeError("Edge Returned Empty Audio Stream.")
 
+    data = bytes(audio_bytes)
+    set_cached_tts(key, data)
     return bytes(audio_bytes)
 
 
@@ -239,8 +278,8 @@ async def tts_worker(guild_id: int):
             combined_text = " ".join(processed_parts)
 
             # Length guard
-            if len(combined_text) > 2500:
-                combined_text = combined_text[:2500]
+            if len(combined_text) > 1500:
+                combined_text = combined_text[:1500]
 
             lang_code = get_user_language(author_id)
 
@@ -252,21 +291,14 @@ async def tts_worker(guild_id: int):
                 print(f"[EDGE FAIL - Guild {guild_id}] {e}")
                 continue
 
-            temp_path = f"temp_{guild_id}.mp3"
-
-            with open(temp_path, "wb") as f:
-                f.write(audio_bytes)
-
-            source = discord.FFmpegPCMAudio(temp_path)
+            source = discord.FFmpegPCMAudio(
+                io.BytesIO(audio_bytes),
+                pipe=True)
 
             voice_client.play(source)
 
             while voice_client.is_playing():
                 await asyncio.sleep(0.5)
-            try:
-                os.remove(temp_path)
-            except FileNotFoundError:
-                pass
         except asyncio.CancelledError:
             break
 
