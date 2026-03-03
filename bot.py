@@ -114,6 +114,7 @@ CUSTOM_REPLACEMENTS = {
     "sgt": "sergeant",
     "ikr": "I know right",
     "atp": "at this point",
+    "ts": "this shit",
 }
 
 # FFmpeg
@@ -159,6 +160,9 @@ async def process_message_text(message: discord.Message) -> str:
 
     text = re.sub(timestamp_pattern, replace_timestamp, text)
     text = replace_acronyms(text)
+
+    # Remove @ From Names
+    text = re.sub(r"@(\w+)", r"\1", text)
 
     return text.strip()
 
@@ -215,47 +219,21 @@ async def tts_worker(guild_id: int):
                     await queue.put(next_msg)
                     break
 
-            # Combine raw clean_content first
-            raw_text_parts = [
-                msg.clean_content.strip()
-                for msg in messages
-                if msg.clean_content.strip()
-            ]
+            # Message processing
+            processed_parts = []
+
+            for msg in messages:
+                processed = await process_message_text(msg)
+                if processed:
+                    processed_parts.append(processed)
 
             for _ in messages:
                 queue.task_done()
 
-            if not raw_text_parts:
+            if not processed_parts:
                 continue
 
-            combined_text = " ".join(raw_text_parts)
-
-            # Timestamp
-            timestamp_pattern = r"<t:(\d+):[a-zA-Z]>"
-
-            def replace_timestamp(match):
-                unix_time = int(match.group(1))
-                dt = datetime.fromtimestamp(unix_time, tz=timezone.utc)
-                return dt.strftime("%B %d %Y at %I:%M %p UTC")
-
-            combined_text = re.sub(
-                timestamp_pattern, replace_timestamp, combined_text)
-
-            def acronym_replacer(match):
-                word = match.group(0)
-                lower = word.lower()
-                return CUSTOM_REPLACEMENTS.get(lower, word)
-
-            combined_text = re.sub(
-                r"\b\w+\b",
-                acronym_replacer,
-                combined_text
-            )
-
-            combined_text = combined_text.strip()
-
-            if not combined_text:
-                continue
+            combined_text = " ".join(processed_parts)
 
             # Length guard
             if len(combined_text) > 2500:
