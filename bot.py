@@ -180,7 +180,7 @@ async def generate_tts_stream(text: str, voice: str) -> bytes:
             audio_bytes.extend(chunk["data"])
 
     if not audio_bytes:
-        raise RuntimeError("Edge returned empty audio stream.")
+        raise RuntimeError("Edge Returned Empty Audio Stream.")
 
     return bytes(audio_bytes)
 
@@ -298,7 +298,7 @@ async def tts_worker(guild_id: int):
 @bot.event
 async def on_ready():
     await bot.tree.sync()
-    print(f"Logged in as {bot.user}")
+    print(f"Successfully Logged In As {bot.user}")
 
 
 @bot.event
@@ -349,7 +349,7 @@ async def join(interaction: discord.Interaction):
 
     await interaction.response.send_message("Joined voice channel.")
     print(
-        f"[JOIN] Bot joined channel '{channel}' in server '{guild.name}' triggered by user '{interaction.user}'")
+        f"[JOIN] Bot joined channel '{channel}' In '{guild.name}' By '{interaction.user}'")
 
 
 @bot.tree.command(name="leave", description="Leave Voice Channel")
@@ -377,7 +377,7 @@ async def leave(interaction: discord.Interaction):
 
         # Logging
         print(
-            f"[LEAVE] Bot left channel '{channel}' in server '{interaction.guild.name} triggered by user '{interaction.user}'")
+            f"[LEAVE] Bot left channel '{channel}' In '{interaction.guild.name} By '{interaction.user}'")
     else:
         await interaction.response.send_message(
             "Not in a voice channel.",
@@ -401,7 +401,7 @@ async def skip(interaction: discord.Interaction):
         voice_client.stop()
         await interaction.response.send_message("Skipped.")
         print(
-            f"[SKIP] Bot skipped TTS in channel '{voice_client.channel}'in server '{interaction.guild.name}' triggered by user '{interaction.user}'")
+            f"[SKIP] Bot skipped TTS in channel '{voice_client.channel}'In '{interaction.guild.name}' By '{interaction.user}'")
     else:
         await interaction.response.send_message(
             "Nothing playing.",
@@ -420,13 +420,42 @@ async def language(interaction: discord.Interaction, code: str):
             ephemeral=True
         )
         return
-
+    # DB writing
     set_user_language(interaction.user.id, code)
 
     await interaction.response.send_message(
         f"Language set to `{code}`.",
         ephemeral=False
     )
+
+
+@bot.tree.command(name="react", description="React To Previous Message")
+async def react_previous(interaction: discord.Interaction, emoji: str):
+    channel = interaction.channel
+
+    # Your message then previous
+    messages = [msg async for msg in channel.history(limit=2)]
+    if len(messages) < 2:
+        await interaction.response.send_message(
+            "No previous message found.",
+            ephemeral=True
+        )
+        return
+    previous_message = messages[1]  # 0 = You, 1 = Previous Msg
+
+    try:
+        await previous_message.add_reaction(emoji)
+        await interaction.response.send_message(
+            f"Reacted with {emoji}",
+            ephemeral=True
+        )
+    except discord.HTTPException:
+        await interaction.response.send_message(
+            "Invalid emoji or missing permissions.",
+            ephemeral=True)
+        print(
+            f"[ERROR] API Call Rejected, '{channel}' In '{interaction.guild.name}' By '{interaction.user}' ")
+
 
 # Run
 
