@@ -32,7 +32,7 @@ VOICE_MAP = {
     "pl": "pl-PL-MarekNeural",
     "fr": "fr-FR-HenriNeural",
     "it": "it-IT-ElsaNeural",
-    "es": "es-ES-LuisNeural",
+    "es": "es-MX-JorgeNeural",
     "de": "de-DE-ConradNeural",
     "ru": "ru-RU-DmitryNeural",
 }
@@ -115,6 +115,9 @@ CUSTOM_REPLACEMENTS = {
     "ikr": "I know right",
     "atp": "at this point",
     "ts": "this shit",
+    "pls": "please",
+    "prob": "probably",
+    "gng": "gang",
 }
 
 # FFmpeg
@@ -205,7 +208,7 @@ async def tts_worker(guild_id: int):
             messages = [message]
             author_id = message.author.id
 
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(0.05)
 
             while True:
                 try:
@@ -351,6 +354,7 @@ async def leave(interaction: discord.Interaction):
         try:
             os.remove(temp_path)
         except FileNotFoundError:
+            print("[ERROR] Temp File Couldn't Be Found & Deleted")
             pass
 
         # Logging
@@ -379,7 +383,7 @@ async def skip(interaction: discord.Interaction):
         voice_client.stop()
         await interaction.response.send_message("Skipped.")
         print(
-            f"[SKIP] Bot skipped TTS in channel '{voice_client.channel}'In '{interaction.guild.name}' By '{interaction.user}'")
+            f"[SKIP] Bot skipped TTS in channel '{voice_client.channel}' In '{interaction.guild.name}' By '{interaction.user}'")
     else:
         await interaction.response.send_message(
             "Nothing playing.",
