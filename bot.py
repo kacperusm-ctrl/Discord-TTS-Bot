@@ -456,14 +456,6 @@ async def react_previous(interaction: discord.Interaction, emoji: str):
             f"[ERROR] API Call Rejected, '{channel}' In '{interaction.guild.name}' By '{interaction.user}' ")
 
 
-@bot.tree.command(name="sync", description="Sync slash commands")
-async def sync(interaction: discord.Interaction):
-    await bot.tree.sync()
-    await interaction.response.send_message("Synced!", ephemeral=True)
-    print(
-        f"[SYNC] Bot Commands Synced, '{interaction.channel}' In '{interaction.guild.name}' By '{interaction.user}' ")
-
-
 # Run
 
 bot.run(TOKEN)
