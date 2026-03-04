@@ -52,21 +52,6 @@ def set_cached_tts(key, value):
         tts_cache.popitem(last=False)
 
 
-# Language
-
-
-VOICE_MAP = {
-    "en": "en-US-EricNeural",
-    "nl": "nl-NL-FennaNeural",
-    "pl": "pl-PL-MarekNeural",
-    "fr": "fr-FR-HenriNeural",
-    "it": "it-IT-ElsaNeural",
-    "es": "es-MX-JorgeNeural",
-    "de": "de-DE-ConradNeural",
-    "ru": "ru-RU-DmitryNeural",
-}
-
-
 # SQlite Database
 def init_db():
     with sqlite3.connect("bot.db") as conn:
@@ -90,6 +75,21 @@ def get_user_language(user_id):
                        (user_id,))
         row = cursor.fetchone()
         return row[0] if row else "en"
+
+
+# Language
+
+
+VOICE_MAP = {
+    "en": "en-US-EricNeural",
+    "nl": "nl-NL-FennaNeural",
+    "pl": "pl-PL-MarekNeural",
+    "fr": "fr-FR-HenriNeural",
+    "it": "it-IT-ElsaNeural",
+    "es": "es-MX-JorgeNeural",
+    "de": "de-DE-ConradNeural",
+    "ru": "ru-RU-DmitryNeural",
+}
 
 
 async def language_autocomplete(
@@ -228,7 +228,7 @@ async def generate_tts_stream(text: str, voice: str) -> bytes:
 
     data = bytes(audio_bytes)
     set_cached_tts(key, data)
-    return bytes(audio_bytes)
+    return data
 
 
 async def tts_worker(guild_id: int):
@@ -239,6 +239,7 @@ async def tts_worker(guild_id: int):
             voice_client = voice_clients.get(guild_id)
 
             if not voice_client or not voice_client.is_connected():
+                voice_clients.pop(guild_id, None)
                 await asyncio.sleep(0.1)
                 continue
 
@@ -246,8 +247,6 @@ async def tts_worker(guild_id: int):
             message = await queue.get()
             messages = [message]
             author_id = message.author.id
-
-            await asyncio.sleep(0.05)
 
             while True:
                 try:
@@ -278,8 +277,8 @@ async def tts_worker(guild_id: int):
             combined_text = " ".join(processed_parts)
 
             # Length guard
-            if len(combined_text) > 1500:
-                combined_text = combined_text[:1500]
+            if len(combined_text) > 1000:
+                combined_text = combined_text[:1000]
 
             lang_code = get_user_language(author_id)
 
@@ -298,7 +297,7 @@ async def tts_worker(guild_id: int):
             voice_client.play(source)
 
             while voice_client.is_playing():
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.05)
         except asyncio.CancelledError:
             break
 
@@ -352,9 +351,11 @@ async def join(interaction: discord.Interaction):
     guild = interaction.guild
 
     if guild.voice_client:
-        if guild.voice_client.channel != channel:
-            await guild.voice_client.move_to(channel)
-        await interaction.response.send_message("Connected.")
+        if guild.voice_client.channel == channel:
+            await interaction.response.send_message("Already connected.")
+            return
+        await guild.voice_client.move_to(channel)
+        await interaction.response.send_message("Moved to your channel.")
         return
 
     voice_client = await channel.connect()
