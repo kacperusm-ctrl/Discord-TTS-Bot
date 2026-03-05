@@ -15,15 +15,11 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 # Config
-
+BATCH_WINDOW = 0.2
 TEXT_CHANNEL_IDS = [
-    1473527027280773120,
-    1471319865817169921
+    1471319865817169921,
+    1473527027280773120
 ]
-
-TTS_PITCH = "+8Hz"
-TTS_RATE = "+5%"
-
 
 # Cache
 
@@ -150,15 +146,32 @@ CUSTOM_REPLACEMENTS = {
     "ur": "your",
     "smth": "something",
     "ik": "i know",
+    "tbh": "to be honest",
+    "fyi": "for your information",
+    "lmk": "let me know",
+    "nvm": "never mind",
+    "irl": "in real life",
+    "ppl": "people",
+    "wyd": "what are you doing",
+    "wya": "where you at",
+    "wydm": "what do you mean",
+    "hbu": "how about you",
+    "idc": "I don't care",
+    "imo": "in my opinion",
+    "jk": "just kidding",
+    "np": "no problem",
+    "thx": "thanks",
+    "yw": "you're welcome",
+    "fr": "for real",
+    "gtg": "got to go",
+    "tmi": "too much information",
+    "gg": "good game",
+    "wp": "well played",
+    "gl": "good luck",
+    "hf": "have fun",
 }
 
-# FFmpeg
 
-
-FFMPEG_OPTIONS = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-    "options": "-vn -loglevel quiet"
-}
 # Bot Setup
 
 intents = discord.Intents.default()
@@ -204,31 +217,77 @@ async def process_message_text(message: discord.Message) -> str:
 # TTS Streaming
 
 
-async def generate_tts_stream(text: str, voice: str) -> bytes:
-    key = make_cache_key(text, voice)
-    cached = get_cached_tts(key)
-    if cached is not None:
-        return cached
+class StreamingPCMAudio(discord.AudioSource):
+    def __init__(self, pcm_queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
+        self.pcm_queue = pcm_queue
+        self.loop = loop
+        self.buffer = bytearray()
+        self.frame_size = 3840  # 20ms @ 48kHz stereo 16-bit
+        self.finished = False
 
-    communicate = edge_tts.Communicate(
-        text=text,
-        voice=voice,
-        pitch=TTS_PITCH,
-        rate=TTS_RATE
+    def read(self):
+        while len(self.buffer) < self.frame_size and not self.finished:
+            future = asyncio.run_coroutine_threadsafe(
+                self.pcm_queue.get(),
+                self.loop
+            )
+            chunk = future.result()
+
+            if chunk is None:
+                self.finished = True
+                break
+
+            self.buffer.extend(chunk)
+
+        if len(self.buffer) == 0 and self.finished:
+            return b''
+
+        if len(self.buffer) < self.frame_size:
+            frame = bytes(self.buffer) + b'\x00' * \
+                (self.frame_size - len(self.buffer))
+            self.buffer.clear()
+            return frame  # already bytes
+
+        frame = bytes(self.buffer[:self.frame_size])
+        self.buffer = self.buffer[self.frame_size:]
+        return frame
+
+    def is_opus(self):
+        return False
+
+
+async def stream_tts_to_pcm_queue(text: str, voice: str, pcm_queue: asyncio.Queue):
+    communicate = edge_tts.Communicate(text=text, voice=voice)
+
+    ffmpeg = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-i", "pipe:0",
+        "-f", "s16le",
+        "-ar", "48000",
+        "-ac", "2",
+        "pipe:1",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
     )
 
-    audio_bytes = bytearray()
+    async def feed_edge_to_ffmpeg():
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                ffmpeg.stdin.write(chunk["data"])
+                await ffmpeg.stdin.drain()
+        ffmpeg.stdin.close()
 
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            audio_bytes.extend(chunk["data"])
+    async def read_pcm():
+        while True:
+            data = await ffmpeg.stdout.read(3840)  # 20ms PCM frame
+            if not data:
+                break
+            await pcm_queue.put(data)
 
-    if not audio_bytes:
-        raise RuntimeError("Edge Returned Empty Audio Stream.")
+        await pcm_queue.put(None)  # signal EOF
 
-    data = bytes(audio_bytes)
-    set_cached_tts(key, data)
-    return data
+    await asyncio.gather(feed_edge_to_ffmpeg(), read_pcm())
 
 
 async def tts_worker(guild_id: int):
@@ -243,15 +302,20 @@ async def tts_worker(guild_id: int):
                 await asyncio.sleep(0.1)
                 continue
 
-            # Batch same-author rapid messages
             message = await queue.get()
             messages = [message]
             author_id = message.author.id
 
+            batch_deadline = asyncio.get_event_loop().time() + BATCH_WINDOW
+
             while True:
+                remaining = batch_deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    break
+
                 try:
-                    next_msg = queue.get_nowait()
-                except asyncio.QueueEmpty:
+                    next_msg = await asyncio.wait_for(queue.get(), timeout=remaining)
+                except asyncio.TimeoutError:
                     break
 
                 if next_msg.author.id == author_id:
@@ -284,20 +348,22 @@ async def tts_worker(guild_id: int):
 
             voice_name = VOICE_MAP.get(lang_code, VOICE_MAP["en"])
 
-            try:
-                audio_bytes = await generate_tts_stream(combined_text, voice_name)
-            except Exception as e:
-                print(f"[EDGE FAIL - Guild {guild_id}] {e}")
-                continue
+            pcm_queue = asyncio.Queue()
 
-            source = discord.FFmpegPCMAudio(
-                io.BytesIO(audio_bytes),
-                pipe=True)
+            source = StreamingPCMAudio(pcm_queue, bot.loop)
 
-            voice_client.play(source)
+            def after_play(error):
+                if error:
+                    print(f"[PLAYBACK ERROR - Guild {guild_id}] {error}")
+                else:
+                    print(
+                        f"[MESSAGE] {bot.user.id} Received Message From {author_id}")
 
-            while voice_client.is_playing():
-                await asyncio.sleep(0.05)
+            voice_client.play(source, after=after_play)
+
+            asyncio.create_task(
+                stream_tts_to_pcm_queue(combined_text, voice_name, pcm_queue)
+            )
         except asyncio.CancelledError:
             break
 
@@ -342,7 +408,7 @@ async def on_message(message: discord.Message):
 async def join(interaction: discord.Interaction):
     if not interaction.user.voice:
         await interaction.response.send_message(
-            "You must be in a voice channel.",
+            "You Must Be In A Voice Channel.",
             ephemeral=True
         )
         return
@@ -363,7 +429,7 @@ async def join(interaction: discord.Interaction):
 
     await interaction.response.send_message("Joined voice channel.")
     print(
-        f"[JOIN] Bot joined channel '{channel}' In '{guild.name}' By '{interaction.user}'")
+        f"[JOIN] Bot Joined Channel '{channel}' In '{guild.name}' By '{interaction.user}'")
 
 
 @bot.tree.command(name="leave", description="Leave Voice Channel")
@@ -383,12 +449,6 @@ async def leave(interaction: discord.Interaction):
         guild_queues.pop(guild_id, None)
 
         await interaction.response.send_message("Disconnected.")
-        temp_path = f"temp_{guild_id}.mp3"
-        try:
-            os.remove(temp_path)
-        except FileNotFoundError:
-            print("[ERROR] Temp File Couldn't Be Found & Deleted")
-            pass
 
         # Logging
         print(
