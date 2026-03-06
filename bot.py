@@ -222,7 +222,7 @@ class StreamingPCMAudio(discord.AudioSource):
         self.pcm_queue = pcm_queue
         self.loop = loop
         self.buffer = bytearray()
-        self.frame_size = 3840  # 20ms @ 48kHz stereo 16-bit
+        self.frame_size = 3840  # 20ms 48kHz stereo 16-bit
         self.finished = False
 
     def read(self):
@@ -257,7 +257,10 @@ class StreamingPCMAudio(discord.AudioSource):
 
 
 async def stream_tts_to_pcm_queue(text: str, voice: str, pcm_queue: asyncio.Queue):
-    communicate = edge_tts.Communicate(text=text, voice=voice)
+    try:
+        communicate = edge_tts.Communicate(text=text, voice=voice)
+    except Exception:
+        await pcm_queue.put(None)
 
     ffmpeg = await asyncio.create_subprocess_exec(
         "ffmpeg",
@@ -340,6 +343,10 @@ async def tts_worker(guild_id: int):
 
             combined_text = " ".join(processed_parts)
 
+            # Ignore messages with no letters or numbers
+            if not re.search(r"[a-zA-Z0-9]", combined_text):
+                continue
+
             # Length guard
             if len(combined_text) > 1000:
                 combined_text = combined_text[:1000]
@@ -357,7 +364,7 @@ async def tts_worker(guild_id: int):
                     print(f"[PLAYBACK ERROR - Guild {guild_id}] {error}")
                 else:
                     print(
-                        f"[MESSAGE] {bot.user.id} Received Message From {author_id}")
+                        f"[MESSAGE] {bot.user} Received Message In '{message.guild.name}' From '{message.author.name}'")
 
             voice_client.play(source, after=after_play)
 
@@ -382,6 +389,17 @@ async def on_ready():
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
+        return
+
+    # Ignore All GIF Attachments
+    if (
+        message.attachments
+        and any(att.content_type and "image/gif" in att.content_type for att in message.attachments)
+    ):
+        return
+
+    # Ignore GIF Links
+    if any(domain in message.content for domain in ("tenor.com", "giphy.com")):
         return
 
     if (
@@ -529,6 +547,41 @@ async def react_previous(interaction: discord.Interaction, emoji: str):
             ephemeral=True)
         print(
             f"[ERROR] API Call Rejected, '{channel}' In '{interaction.guild.name}' By '{interaction.user}' ")
+
+
+@bot.tree.command(name="unreact", description="Remove The Last Reaction In The Channel")
+async def remove_last_reaction(interaction: discord.Interaction):
+    channel = interaction.channel
+
+    # Find most recent message with reactions
+    async for msg in channel.history(limit=50):
+        if msg.reactions:
+            previous_message = msg
+            break
+    else:
+        await interaction.response.send_message(
+            "No Reactions Found In Recent Messages.",
+            ephemeral=True
+        )
+        return
+
+    # Get the last reaction object
+    reaction = previous_message.reactions[-1]
+
+    try:
+        await previous_message.remove_reaction(reaction.emoji, interaction.client.user)
+        await interaction.response.send_message(
+            f"Removed reaction {reaction.emoji}",
+            ephemeral=True
+        )
+    except discord.HTTPException:
+        await interaction.response.send_message(
+            "Failed To Remove Reaction (Missing Permissions?).",
+            ephemeral=True
+        )
+        print(
+            f"[ERROR] Could Not Remove Reaction In '{channel}' By '{interaction.user}'"
+        )
 
 
 # Run
