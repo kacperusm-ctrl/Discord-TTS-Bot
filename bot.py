@@ -77,14 +77,24 @@ def get_user_language(user_id):
 
 
 VOICE_MAP = {
-    "en": "en-US-EricNeural",
-    "nl": "nl-NL-FennaNeural",
-    "pl": "pl-PL-MarekNeural",
-    "fr": "fr-FR-HenriNeural",
-    "it": "it-IT-ElsaNeural",
-    "es": "es-MX-JorgeNeural",
-    "de": "de-DE-ConradNeural",
-    "ru": "ru-RU-DmitryNeural",
+    "enM": "en-US-GuyNeural",
+    "enF": "en-US-JennaNeural",
+    "nlM": "nl-NL-MaartenNeural",
+    "nlF": "nl-NL-FennaNeural",
+    "plM": "pl-PL-MarekNeural",
+    "plF": "pl-PL-ZofiaNeural",
+    "frM": "fr-FR-HenriNeural",
+    "frF": "fr-FR-DeniseNeural",
+    "itM": "it-IT-DiegoNeural",
+    "itF": "it-IT-ElsaNeural",
+    "esM": "es-MX-JorgeNeural",
+    "esF": "es-MX-ElviraNeural",
+    "deM": "de-DE-ConradNeural",
+    "deF": "de-DE-KatjaNeural",
+    "ruM": "ru-RU-DmitryNeural",
+    "ruF": "ru-RU-SvetlanaNeural",
+    "chM": "zh-CN-YunxiNeural",
+    "chF": "zh-CN-XiaoxiaoNeural",
 }
 
 
@@ -353,11 +363,10 @@ async def tts_worker(guild_id: int):
 
             lang_code = get_user_language(author_id)
 
-            voice_name = VOICE_MAP.get(lang_code, VOICE_MAP["en"])
-
+            voice_name = VOICE_MAP.get(lang_code, VOICE_MAP["enM"])
             pcm_queue = asyncio.Queue()
-
             source = StreamingPCMAudio(pcm_queue, bot.loop)
+            playback_finished = asyncio.Event()
 
             def after_play(error):
                 if error:
@@ -365,12 +374,21 @@ async def tts_worker(guild_id: int):
                 else:
                     print(
                         f"[MESSAGE] {bot.user} Received Message In '{message.guild.name}' From '{message.author.name}'")
+                    # Signal Finished Playing
+                bot.loop.call_soon_threadsafe(playback_finished.set)
+
+            # Prevent Accidental Queue Errors
+            if voice_client.is_playing():
+                voice_client.stop()
 
             voice_client.play(source, after=after_play)
 
             asyncio.create_task(
                 stream_tts_to_pcm_queue(combined_text, voice_name, pcm_queue)
             )
+
+            await playback_finished.wait()
+
         except asyncio.CancelledError:
             break
 
@@ -505,7 +523,7 @@ async def skip(interaction: discord.Interaction):
 @bot.tree.command(name="language", description="Set TTS Language")
 @app_commands.autocomplete(code=language_autocomplete)
 async def language(interaction: discord.Interaction, code: str):
-    code = code.lower().strip()
+    code = code.strip()
 
     if code not in VOICE_MAP:
         await interaction.response.send_message(
