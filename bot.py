@@ -13,12 +13,15 @@ from collections import OrderedDict
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
+if not TOKEN:
+    raise RuntimeError("DISCORD_TOKEN missing")
 
 # Config
 BATCH_WINDOW = 0.2
 TEXT_CHANNEL_IDS = [
     1471319865817169921,
-    1473527027280773120
+    1473527027280773120,
+    1482238751093690430
 ]
 
 # Cache
@@ -28,19 +31,19 @@ tts_cache = OrderedDict()
 
 
 def make_cache_key(text, voice):
-    return (text, voice)
+    return (text.lower().strip(), voice)
 
 
 def get_cached_tts(key):
-    if key in tts_cache:
-        # Move to end to mark as recently used
+    value = tts_cache.get(key)
+
+    if value is not None:
         tts_cache.move_to_end(key)
-        return tts_cache[key]
-    return None
+
+    return value
 
 
 def set_cached_tts(key, value):
-    # Insert and evict oldest if limit exceeded
     tts_cache[key] = value
     tts_cache.move_to_end(key)
 
@@ -130,7 +133,7 @@ CUSTOM_REPLACEMENTS = {
     "idk": "I don't know",
     "omw": "on my way",
     "smh": "shaking my head",
-    "ty": "thanks",
+    "ty": "thank you",
     "ig": "i guess",
     "rq": "real quick",
     "tysm": "thank you so much",
@@ -157,7 +160,8 @@ CUSTOM_REPLACEMENTS = {
     "smth": "something",
     "ik": "i know",
     "tbh": "to be honest",
-    "fyi": "for your information",
+    "lwk": "low key",
+    "lowk": "low key",
     "lmk": "let me know",
     "nvm": "never mind",
     "irl": "in real life",
@@ -173,12 +177,14 @@ CUSTOM_REPLACEMENTS = {
     "thx": "thanks",
     "yw": "you're welcome",
     "fr": "for real",
-    "gtg": "got to go",
-    "tmi": "too much information",
     "gg": "good game",
     "wp": "well played",
     "gl": "good luck",
     "hf": "have fun",
+    "afk": "A F K",
+    "wsp": "whats up",
+    "btw": "by the way",
+    "pmo": "piss me off",
 }
 
 
@@ -220,7 +226,7 @@ async def process_message_text(message: discord.Message) -> str:
     text = replace_acronyms(text)
 
     # Remove @ From Names
-    text = re.sub(r"@(\w+)", r"\1", text)
+    text = re.sub(r"<@!?(\d+)>", "", text)
 
     return text.strip()
 
@@ -266,7 +272,8 @@ class StreamingPCMAudio(discord.AudioSource):
         return False
 
 
-async def stream_tts_to_pcm_queue(text: str, voice: str, pcm_queue: asyncio.Queue):
+async def stream_tts_to_pcm_queue(text: str, voice: str, pcm_queue: asyncio.Queue, cache_key):
+    pcm_frames = []
     try:
         communicate = edge_tts.Communicate(text=text, voice=voice)
     except Exception:
@@ -296,7 +303,12 @@ async def stream_tts_to_pcm_queue(text: str, voice: str, pcm_queue: asyncio.Queu
             data = await ffmpeg.stdout.read(3840)  # 20ms PCM frame
             if not data:
                 break
+
+            pcm_frames.append(data)
             await pcm_queue.put(data)
+
+            if cache_key is not None:
+                set_cached_tts(cache_key, pcm_frames)
 
         await pcm_queue.put(None)  # signal EOF
 
@@ -315,7 +327,7 @@ async def tts_worker(guild_id: int):
                 await asyncio.sleep(0.1)
                 continue
 
-            message = await queue.get()
+            message = await asyncio.wait_for(queue.get(), timeout=300)
             messages = [message]
             author_id = message.author.id
 
@@ -377,16 +389,25 @@ async def tts_worker(guild_id: int):
                     # Signal Finished Playing
                 bot.loop.call_soon_threadsafe(playback_finished.set)
 
-            # Prevent Accidental Queue Errors
-            if voice_client.is_playing():
-                voice_client.stop()
-
             voice_client.play(source, after=after_play)
 
-            asyncio.create_task(
-                stream_tts_to_pcm_queue(combined_text, voice_name, pcm_queue)
-            )
+            cache_key = make_cache_key(combined_text, voice_name)
+            cached_audio = get_cached_tts(cache_key)
 
+            if cached_audio:
+                for frame in cached_audio:
+                    await pcm_queue.put(frame)
+
+                await pcm_queue.put(None)
+            else:
+                asyncio.create_task(
+                    stream_tts_to_pcm_queue(
+                        combined_text,
+                        voice_name,
+                        pcm_queue,
+                        cache_key,
+                    )
+                )
             await playback_finished.wait()
 
         except asyncio.CancelledError:
