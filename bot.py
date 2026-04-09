@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import commands
 import asyncio
 import edge_tts
+from edge_tts.exceptions import NoAudioReceived
 from dotenv import load_dotenv
 import sqlite3
 import io
@@ -81,7 +82,7 @@ def get_user_language(user_id):
 
 VOICE_MAP = {
     "enM": "en-US-GuyNeural",
-    "enF": "en-US-JennaNeural",
+    "enF": "en-US-JennyNeural",
     "nlM": "nl-NL-MaartenNeural",
     "nlF": "nl-NL-FennaNeural",
     "plM": "pl-PL-MarekNeural",
@@ -201,34 +202,39 @@ guild_workers = {}
 user_voice_lang = {}
 
 # Text Processing
+TIMESTAMP_PATTERN = r"<t:\d+:[a-zA-Z]>"
+ACRONYM_PATTERN = re.compile(
+    r'\b(' + '|'.join(re.escape(k)
+                      for k in CUSTOM_REPLACEMENTS.keys()) + r')\b',
+    flags=re.IGNORECASE
+)
 
 
 def replace_acronyms(text: str) -> str:
-    words = text.split()
-    for i, word in enumerate(words):
-        key = word.lower()
-        if key in CUSTOM_REPLACEMENTS:
-            words[i] = CUSTOM_REPLACEMENTS[key]
-    return " ".join(words)
+    def repl(match):
+        key = match.group(0).lower()
+        return CUSTOM_REPLACEMENTS.get(key, match.group(0))
+    return ACRONYM_PATTERN.sub(repl, text)
+
+
+def remove_timestamps(text: str) -> str:
+    return re.sub(TIMESTAMP_PATTERN, "", text)
 
 
 async def process_message_text(message: discord.Message) -> str:
     text = message.clean_content
 
-    timestamp_pattern = r"<t:(\d+):[a-zA-Z]>"
+    # Remove timestamps completely
+    text = remove_timestamps(text)
 
-    def replace_timestamp(match):
-        unix_time = int(match.group(1))
-        dt = datetime.fromtimestamp(unix_time, tz=timezone.utc)
-        return dt.strftime("%B %d %Y at %I:%M %p UTC")
-
-    text = re.sub(timestamp_pattern, replace_timestamp, text)
+    # Replace acronyms properly
     text = replace_acronyms(text)
 
-    # Remove @ From Names
-    text = re.sub(r"<@!?(\d+)>", "", text)
+    # Remove mentions and normalize whitespace
+    text = re.sub(r'\s*<@!?(\d+)>\s*', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
 
-    return text.strip()
+    return text
 
 # TTS Streaming
 
@@ -238,22 +244,28 @@ class StreamingPCMAudio(discord.AudioSource):
         self.pcm_queue = pcm_queue
         self.loop = loop
         self.buffer = bytearray()
-        self.frame_size = 3840  # 20ms 48kHz stereo 16-bit
+        self.frame_size = 3840  # 20ms PCM frame
         self.finished = False
 
     def read(self):
         while len(self.buffer) < self.frame_size and not self.finished:
-            future = asyncio.run_coroutine_threadsafe(
-                self.pcm_queue.get(),
-                self.loop
-            )
-            chunk = future.result()
+            try:
+                # Thread-safe call to async queue
+                future = asyncio.run_coroutine_threadsafe(
+                    self.pcm_queue.get(), self.loop
+                )
+                chunk = future.result(timeout=1)  # wait 1 second max
 
-            if chunk is None:
+                if chunk is None:
+                    self.finished = True
+                    break
+
+                self.buffer.extend(chunk)
+
+            except Exception:
+                # Timeout or any other error
                 self.finished = True
                 break
-
-            self.buffer.extend(chunk)
 
         if len(self.buffer) == 0 and self.finished:
             return b''
@@ -262,7 +274,7 @@ class StreamingPCMAudio(discord.AudioSource):
             frame = bytes(self.buffer) + b'\x00' * \
                 (self.frame_size - len(self.buffer))
             self.buffer.clear()
-            return frame  # already bytes
+            return frame
 
         frame = bytes(self.buffer[:self.frame_size])
         self.buffer = self.buffer[self.frame_size:]
@@ -276,8 +288,10 @@ async def stream_tts_to_pcm_queue(text: str, voice: str, pcm_queue: asyncio.Queu
     pcm_frames = []
     try:
         communicate = edge_tts.Communicate(text=text, voice=voice)
-    except Exception:
+    except NoAudioReceived:
+        print(f"[TTS ERROR] No audio for voice {voice} and text: {text}")
         await pcm_queue.put(None)
+        return
 
     ffmpeg = await asyncio.create_subprocess_exec(
         "ffmpeg",
@@ -328,52 +342,31 @@ async def tts_worker(guild_id: int):
                 continue
 
             message = await asyncio.wait_for(queue.get(), timeout=300)
-            messages = [message]
-            author_id = message.author.id
-
-            batch_deadline = asyncio.get_event_loop().time() + BATCH_WINDOW
-
-            while True:
-                remaining = batch_deadline - asyncio.get_event_loop().time()
-                if remaining <= 0:
-                    break
-
-                try:
-                    next_msg = await asyncio.wait_for(queue.get(), timeout=remaining)
-                except asyncio.TimeoutError:
-                    break
-
-                if next_msg.author.id == author_id:
-                    messages.append(next_msg)
-                else:
-                    await queue.put(next_msg)
-                    break
 
             # Message processing
-            processed_parts = []
+            processed_text = await process_message_text(message)
+            queue.task_done()
 
-            for msg in messages:
-                processed = await process_message_text(msg)
-                if processed:
-                    processed_parts.append(processed)
-
-            for _ in messages:
-                queue.task_done()
-
-            if not processed_parts:
+            if not processed_text:
                 continue
-
-            combined_text = " ".join(processed_parts)
 
             # Ignore messages with no letters or numbers
-            if not re.search(r"[a-zA-Z0-9]", combined_text):
+            if not re.search(r"[a-zA-Z0-9]", processed_text):
                 continue
 
-            # Length guard
-            if len(combined_text) > 1000:
-                combined_text = combined_text[:1000]
+            MAX_LENGTH = 1000
+            if len(processed_text) > MAX_LENGTH:
+                # Send a reply to the channel
+                await message.channel.send(
+                    f"Message Too Long ({MAX_LENGTH}+ characters)",
+                    reference=message,
+                    mention_author=True
+                )
+                print(
+                    f"[ERROR] '{message.author.name}' sent a message over character limit ({len(processed_text)} charachters)")
+                continue  # skip TTS for this message
 
-            lang_code = get_user_language(author_id)
+            lang_code = get_user_language(message.author.id)
 
             voice_name = VOICE_MAP.get(lang_code, VOICE_MAP["enM"])
             pcm_queue = asyncio.Queue()
@@ -391,7 +384,7 @@ async def tts_worker(guild_id: int):
 
             voice_client.play(source, after=after_play)
 
-            cache_key = make_cache_key(combined_text, voice_name)
+            cache_key = make_cache_key(processed_text, voice_name)
             cached_audio = get_cached_tts(cache_key)
 
             if cached_audio:
@@ -402,7 +395,7 @@ async def tts_worker(guild_id: int):
             else:
                 asyncio.create_task(
                     stream_tts_to_pcm_queue(
-                        combined_text,
+                        processed_text,
                         voice_name,
                         pcm_queue,
                         cache_key,
@@ -495,6 +488,13 @@ async def leave(interaction: discord.Interaction):
     channel = interaction.user.voice.channel
     voice_client = voice_clients.get(guild_id)
 
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        await interaction.response.send_message(
+            "You Must Be In A Voice Channel.",
+            ephemeral=True
+        )
+        return
+
     if voice_client and voice_client.is_connected():
         await voice_client.disconnect()
         voice_clients.pop(guild_id, None)
@@ -580,6 +580,8 @@ async def react_previous(interaction: discord.Interaction, emoji: str):
             f"Reacted with {emoji}",
             ephemeral=True
         )
+        print(
+            f"[REACT] Reacted To Message In '{interaction.guild.name}' In '{channel}' By '{interaction.user}' ")
     except discord.HTTPException:
         await interaction.response.send_message(
             "Invalid emoji or missing permissions.",
@@ -613,6 +615,8 @@ async def remove_last_reaction(interaction: discord.Interaction):
             f"Removed reaction {reaction.emoji}",
             ephemeral=True
         )
+        print(
+            f"[UNREACT] Unreacted To Message In '{interaction.guild.name}' In '{channel}' By '{interaction.user}' ")
     except discord.HTTPException:
         await interaction.response.send_message(
             "Failed To Remove Reaction (Missing Permissions?).",
