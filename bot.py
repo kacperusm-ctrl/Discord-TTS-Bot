@@ -19,14 +19,9 @@ if not TOKEN:
 
 # Config
 BATCH_WINDOW = 0.2
-TEXT_CHANNEL_IDS = [
-    1471319865817169921,
-    1473527027280773120,
-    1482238751093690430
-]
 
 # Cache
-
+tts_channel_cache = {}
 TTS_CACHE_LIMIT = 100
 tts_cache = OrderedDict()
 
@@ -62,10 +57,65 @@ def init_db():
             language TEXT NOT NULL
         )
         """)
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tts_channels (
+            guild_id INTEGER,
+            channel_id INTEGER,
+            PRIMARY KEY (guild_id, channel_id)
+        )
+        """)
+
         conn.commit()
 
 
 init_db()
+
+
+# Channels
+def add_tts_channel(guild_id, channel_id):
+    with sqlite3.connect("bot.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+        INSERT OR IGNORE INTO tts_channels (guild_id, channel_id)
+        VALUES (?, ?)
+        """, (guild_id, channel_id))
+        conn.commit()
+    tts_channel_cache.setdefault(guild_id, set()).add(channel_id)
+
+
+def remove_tts_channel(guild_id, channel_id):
+    with sqlite3.connect("bot.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+        DELETE FROM tts_channels
+        WHERE guild_id = ? AND channel_id = ?
+        """, (guild_id, channel_id))
+        conn.commit()
+    if guild_id in tts_channel_cache:
+        tts_channel_cache[guild_id].discard(channel_id)
+        if not tts_channel_cache[guild_id]:
+            del tts_channel_cache[guild_id]
+
+
+def load_tts_channels():
+    with sqlite3.connect("bot.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT guild_id, channel_id FROM tts_channels")
+        rows = cursor.fetchall()
+
+    cache = {}
+    for guild_id, channel_id in rows:
+        cache.setdefault(guild_id, set()).add(channel_id)
+
+    return cache
+
+
+def is_tts_channel(guild_id: int, channel_id: int) -> bool:
+    return channel_id in tts_channel_cache.get(guild_id, set())
+
+
+# Language
 
 
 def get_user_language(user_id):
@@ -194,7 +244,7 @@ CUSTOM_REPLACEMENTS = {
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="~", intents=intents)
 
 voice_clients = {}
 guild_queues = {}
@@ -206,6 +256,10 @@ TIMESTAMP_PATTERN = r"<t:\d+:[a-zA-Z]>"
 ACRONYM_PATTERN = re.compile(
     r'\b(' + '|'.join(re.escape(k)
                       for k in CUSTOM_REPLACEMENTS.keys()) + r')\b',
+    flags=re.IGNORECASE
+)
+DISCORD_GIF_URL_PATTERN = re.compile(
+    r"https?://cdn\.discordapp\.com/attachments/\S+?\.gif(?:\?\S*)?",
     flags=re.IGNORECASE
 )
 
@@ -224,13 +278,13 @@ def remove_timestamps(text: str) -> str:
 async def process_message_text(message: discord.Message) -> str:
     text = message.clean_content
 
-    # Remove timestamps completely
+    text = DISCORD_GIF_URL_PATTERN.sub("An Image File", text)
+
     text = remove_timestamps(text)
 
-    # Replace acronyms properly
     text = replace_acronyms(text)
 
-    # Remove mentions and normalize whitespace
+    # Remove @ mentions and normalize whitespace
     text = re.sub(r'\s*<@!?(\d+)>\s*', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
 
@@ -250,7 +304,6 @@ class StreamingPCMAudio(discord.AudioSource):
     def read(self):
         while len(self.buffer) < self.frame_size and not self.finished:
             try:
-                # Thread-safe call to async queue
                 future = asyncio.run_coroutine_threadsafe(
                     self.pcm_queue.get(), self.loop
                 )
@@ -414,6 +467,8 @@ async def tts_worker(guild_id: int):
 
 @bot.event
 async def on_ready():
+    global tts_channel_cache
+    tts_channel_cache = load_tts_channels()
     await bot.tree.sync()
     print(f"Successfully Logged In As {bot.user}")
 
@@ -436,7 +491,7 @@ async def on_message(message: discord.Message):
 
     if (
         message.guild
-        and message.channel.id in TEXT_CHANNEL_IDS
+        and is_tts_channel(message.guild.id, message.channel.id)
         and message.guild.id in voice_clients
     ):
         guild_id = message.guild.id
@@ -449,7 +504,28 @@ async def on_message(message: discord.Message):
 
         await guild_queues[guild_id].put(message)
 
-    await bot.process_commands(message)
+# Slash Command Perms
+
+ALLOWED_ROLE_IDS = {
+    1285234634145402991,
+    1285234614373187718,
+
+}
+
+
+def permission_gate():
+    async def predicate(interaction: discord.Interaction):
+
+        perms = interaction.user.guild_permissions
+
+        if perms.administrator:
+            return True
+
+        role_ids = {r.id for r in interaction.user.roles}
+
+        return bool(role_ids & ALLOWED_ROLE_IDS)
+
+    return app_commands.check(predicate)
 
 # Slash Commands
 
@@ -485,8 +561,14 @@ async def join(interaction: discord.Interaction):
 @bot.tree.command(name="leave", description="Leave Voice Channel")
 async def leave(interaction: discord.Interaction):
     guild_id = interaction.guild.id
-    channel = interaction.user.voice.channel
     voice_client = voice_clients.get(guild_id)
+
+    if not voice_client or not voice_client.is_connected():
+        await interaction.response.send_message(
+            "Not in a voice channel.",
+            ephemeral=True
+        )
+        return
 
     if not interaction.user.voice or not interaction.user.voice.channel:
         await interaction.response.send_message(
@@ -494,6 +576,8 @@ async def leave(interaction: discord.Interaction):
             ephemeral=True
         )
         return
+
+    channel = interaction.user.voice.channel
 
     if voice_client and voice_client.is_connected():
         await voice_client.disconnect()
@@ -626,6 +710,64 @@ async def remove_last_reaction(interaction: discord.Interaction):
             f"[ERROR] Could Not Remove Reaction In '{channel}' By '{interaction.user}'"
         )
 
+
+@bot.tree.command(name="channel_add", description="Enable TTS in this channel")
+@permission_gate()
+@app_commands.default_permissions(manage_channels=True)
+async def tts_add(interaction: discord.Interaction):
+    guild_id = interaction.guild.id
+    channel_id = interaction.channel.id
+
+    if is_tts_channel(guild_id, channel_id):
+        await interaction.response.send_message(
+            "TTS is already enabled in this channel.",
+            ephemeral=True
+        )
+        return
+
+    add_tts_channel(guild_id, channel_id)
+
+    await interaction.response.send_message(
+        "TTS enabled in this channel.")
+    print(
+        f"[CHANNEL ADDED] '{interaction.user}' added '{interaction.channel}' in '{interaction.guild.name}'"
+    )
+
+
+@bot.tree.command(name="channel_remove", description="Disable TTS in this channel")
+@permission_gate()
+@app_commands.default_permissions(manage_channels=True)
+async def tts_remove(interaction: discord.Interaction):
+    guild_id = interaction.guild.id
+    channel_id = interaction.channel.id
+    if not is_tts_channel(guild_id, channel_id):
+        await interaction.response.send_message(
+            "TTS is not enabled in this channel.",
+            ephemeral=True
+        )
+        return
+
+    remove_tts_channel(guild_id, channel_id)
+
+    await interaction.response.send_message(
+        "TTS disabled in this channel.")
+    print(
+        f"[CHANNEL REMOVED] '{interaction.user}' removed '{interaction.channel}' in '{interaction.guild.name}'"
+    )
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error):
+
+    if isinstance(error, app_commands.MissingPermissions) or isinstance(error, app_commands.CheckFailure):
+        await interaction.response.send_message(
+            "You Don't Have The Authorization Required For This Command",
+            ephemeral=True
+        )
+        return
+
+    # Only re-raise unexpected errors
+    raise error
 
 # Run
 
