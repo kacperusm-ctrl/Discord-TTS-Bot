@@ -6,10 +6,8 @@ import edge_tts
 from edge_tts.exceptions import NoAudioReceived
 from dotenv import load_dotenv
 import sqlite3
-import io
 import re
 import os
-from datetime import datetime, timezone
 from collections import OrderedDict
 
 load_dotenv()

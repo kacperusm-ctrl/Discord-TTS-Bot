@@ -1,13 +1,3 @@
-import discord
-from discord import app_commands
-from discord.ext import commands
-import asyncio
-import edge_tts
-from dotenv import load_dotenv
-import sqlite3
-import io
-import re
-import os
-from datetime import datetime, timezone
-from collections import OrderedDict
-FFMPEG
+discord.py
+edge-tts
+pythondotenv
