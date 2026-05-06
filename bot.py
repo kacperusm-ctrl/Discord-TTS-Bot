@@ -15,8 +15,6 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN missing")
 
-# Config
-BATCH_WINDOW = 0.2
 
 # Cache
 tts_channel_cache = {}
@@ -140,13 +138,17 @@ VOICE_MAP = {
     "itM": "it-IT-DiegoNeural",
     "itF": "it-IT-ElsaNeural",
     "esM": "es-MX-JorgeNeural",
-    "esF": "es-MX-ElviraNeural",
+    "esF": "es-MX-DaliaNeural",
     "deM": "de-DE-ConradNeural",
     "deF": "de-DE-KatjaNeural",
     "ruM": "ru-RU-DmitryNeural",
     "ruF": "ru-RU-SvetlanaNeural",
     "chM": "zh-CN-YunxiNeural",
     "chF": "zh-CN-XiaoxiaoNeural",
+    "jaM": "ja-JP-KeitaNeural",
+    "jaF": "ja-JP-NanamiNeural",
+    "koM": "ko-KR-InJoonNeural",
+    "koF": "ko-KR-SunHiNeural",
 }
 
 
@@ -241,6 +243,7 @@ CUSTOM_REPLACEMENTS = {
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.voice_states = True
 
 bot = commands.Bot(command_prefix="~", intents=intents)
 
@@ -251,13 +254,20 @@ user_voice_lang = {}
 
 # Text Processing
 TIMESTAMP_PATTERN = r"<t:\d+:[a-zA-Z]>"
+
 ACRONYM_PATTERN = re.compile(
     r'\b(' + '|'.join(re.escape(k)
                       for k in CUSTOM_REPLACEMENTS.keys()) + r')\b',
     flags=re.IGNORECASE
 )
+
 DISCORD_GIF_URL_PATTERN = re.compile(
     r"https?://cdn\.discordapp\.com/attachments/\S+?\.gif(?:\?\S*)?",
+    flags=re.IGNORECASE
+)
+
+URL_PATTERN = re.compile(
+    r"https?://\S+|www\.\S+",
     flags=re.IGNORECASE
 )
 
@@ -270,13 +280,23 @@ def replace_acronyms(text: str) -> str:
 
 
 def remove_timestamps(text: str) -> str:
-    return re.sub(TIMESTAMP_PATTERN, "", text)
+    return re.sub(TIMESTAMP_PATTERN, " A Timestamp ", text)
+
+
+def replace_gifs(text: str) -> str:
+    return DISCORD_GIF_URL_PATTERN.sub(" A Gif ", text)
+
+
+def replace_links(text: str) -> str:
+    return URL_PATTERN.sub(" A Link ", text)
 
 
 async def process_message_text(message: discord.Message) -> str:
     text = message.clean_content
 
-    text = DISCORD_GIF_URL_PATTERN.sub("An Image File", text)
+    text = replace_links(text)
+
+    text = replace_gifs(text)
 
     text = remove_timestamps(text)
 
@@ -392,7 +412,7 @@ async def tts_worker(guild_id: int):
                 await asyncio.sleep(0.1)
                 continue
 
-            message = await asyncio.wait_for(queue.get(), timeout=300)
+            message = await asyncio.wait_for(queue.get(), timeout=600)
 
             # Message processing
             processed_text = await process_message_text(message)
@@ -502,7 +522,7 @@ async def on_message(message: discord.Message):
 
         await guild_queues[guild_id].put(message)
 
-# Slash Command Perms
+# Slash Command Perms + All Server Admins
 
 ALLOWED_ROLE_IDS = {
     1285234634145402991,
@@ -624,21 +644,21 @@ async def skip(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="language", description="Set TTS Language")
-@app_commands.autocomplete(code=language_autocomplete)
-async def language(interaction: discord.Interaction, code: str):
-    code = code.strip()
+@app_commands.autocomplete(lang=language_autocomplete)
+async def language(interaction: discord.Interaction, lang: str):
+    lang = lang.strip()
 
-    if code not in VOICE_MAP:
+    if lang not in VOICE_MAP:
         await interaction.response.send_message(
             f"Invalid language. Options: {', '.join(VOICE_MAP)}",
             ephemeral=True
         )
         return
     # DB writing
-    set_user_language(interaction.user.id, code)
+    set_user_language(interaction.user.id, lang)
 
     await interaction.response.send_message(
-        f"Language set to `{code}`.",
+        f"Language set to `{lang}`.",
         ephemeral=False
     )
 
@@ -766,6 +786,45 @@ async def on_app_command_error(interaction: discord.Interaction, error):
 
     # Only re-raise unexpected errors
     raise error
+
+
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    if member.bot:
+        return
+
+    guild_id = member.guild.id
+    voice_client = voice_clients.get(guild_id)
+
+    if not voice_client or not voice_client.is_connected():
+        return
+
+    bot_channel = voice_client.channel
+    human_members = [m for m in bot_channel.members if not m.bot]
+
+    if len(human_members) == 0:
+        await voice_client.disconnect()
+        voice_clients.pop(guild_id, None)
+
+        if guild_id in guild_workers:
+            guild_workers[guild_id].cancel()
+            guild_workers.pop(guild_id, None)
+
+        guild_queues.pop(guild_id, None)
+
+        # Find a TTS channel to send the notification in
+        tts_channel_ids = tts_channel_cache.get(guild_id, set())
+        for channel_id in tts_channel_ids:
+            text_channel = member.guild.get_channel(channel_id)
+            if text_channel:
+                await text_channel.send(
+                    f"Left '{bot_channel.name}' - Empty Channel "
+                )
+                break
+
+        print(
+            f"[AUTO-LEAVE] Bot left '{bot_channel}' in '{member.guild.name}' ")
+
 
 # Run
 
