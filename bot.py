@@ -9,6 +9,7 @@ import sqlite3
 import re
 import os
 from collections import OrderedDict
+import time
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -62,6 +63,16 @@ def init_db():
         )
         """)
 
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tts_mutes (
+            guild_id INTEGER,
+            user_id INTEGER,
+            unmute_at REAL,
+            reason TEXT,
+            PRIMARY KEY (guild_id, user_id)
+        )
+        """)
+
         conn.commit()
 
 
@@ -110,6 +121,56 @@ def load_tts_channels():
 def is_tts_channel(guild_id: int, channel_id: int) -> bool:
     return channel_id in tts_channel_cache.get(guild_id, set())
 
+# TTS Mutes
+
+
+def add_tts_mute(guild_id, user_id, unmute_at, reason):
+    with sqlite3.connect("bot.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+        INSERT INTO tts_mutes (guild_id, user_id, unmute_at, reason)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(guild_id, user_id)
+        DO UPDATE SET unmute_at=excluded.unmute_at, reason=excluded.reason
+        """, (guild_id, user_id, unmute_at, reason))
+        conn.commit()
+    tts_muted_users.setdefault(guild_id, {})[user_id] = unmute_at
+
+
+def remove_tts_mute(guild_id, user_id):
+    with sqlite3.connect("bot.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+        DELETE FROM tts_mutes WHERE guild_id = ? AND user_id = ?
+        """, (guild_id, user_id))
+        conn.commit()
+    if guild_id in tts_muted_users:
+        tts_muted_users[guild_id].pop(user_id, None)
+
+
+def load_tts_mutes():
+    with sqlite3.connect("bot.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT guild_id, user_id, unmute_at FROM tts_mutes")
+        rows = cursor.fetchall()
+
+    cache = {}
+    now = time.time()
+    for guild_id, user_id, unmute_at in rows:
+        if unmute_at is None or now < unmute_at:
+            cache.setdefault(guild_id, {})[user_id] = unmute_at
+    return cache
+
+
+def is_tts_muted(guild_id, user_id) -> bool:
+    unmute_at = tts_muted_users.get(guild_id, {}).get(user_id)
+    if unmute_at is None:
+        return False
+    if time.time() >= unmute_at:
+        # Expired — clean up lazily
+        remove_tts_mute(guild_id, user_id)
+        return False
+    return True
 
 # Language
 
@@ -121,9 +182,6 @@ def get_user_language(user_id):
                        (user_id,))
         row = cursor.fetchone()
         return row[0] if row else "en"
-
-
-# Language
 
 
 VOICE_MAP = {
@@ -251,6 +309,7 @@ voice_clients = {}
 guild_queues = {}
 guild_workers = {}
 user_voice_lang = {}
+tts_muted_users = {}
 
 # Text Processing
 TIMESTAMP_PATTERN = r"<t:\d+:[a-zA-Z]>"
@@ -485,7 +544,7 @@ async def tts_worker(guild_id: int):
 
 @bot.event
 async def on_ready():
-    global tts_channel_cache
+    global tts_channel_cache, tts_muted_users
     tts_channel_cache = load_tts_channels()
     await bot.tree.sync()
     print(f"Successfully Logged In As {bot.user}")
@@ -507,6 +566,9 @@ async def on_message(message: discord.Message):
     if any(domain in message.content for domain in ("tenor.com", "giphy.com")):
         return
 
+    if is_tts_muted(message.guild.id, message.author.id):
+        return
+
     if (
         message.guild
         and is_tts_channel(message.guild.id, message.channel.id)
@@ -521,6 +583,23 @@ async def on_message(message: discord.Message):
             )
 
         await guild_queues[guild_id].put(message)
+
+
+# Mute duration unit autocomplete
+
+DURATION_UNITS = ["seconds", "minutes", "hours"]
+
+
+async def duration_unit_autocomplete(
+    interaction: discord.Interaction,
+    current: str
+):
+    return [
+        app_commands.Choice(name=unit, value=unit)
+        for unit in DURATION_UNITS
+        if current.lower() in unit.lower()
+    ]
+
 
 # Slash Command Perms + All Server Admins
 
@@ -772,6 +851,70 @@ async def tts_remove(interaction: discord.Interaction):
     print(
         f"[CHANNEL REMOVED] '{interaction.user}' removed '{interaction.channel}' in '{interaction.guild.name}'"
     )
+
+
+@bot.tree.command(name="mute", description="Mute A User's TTS Messages")
+@permission_gate()
+@app_commands.describe(
+    user="The user to mute",
+    duration="How long to mute (e.g. 10)",
+    unit="Unit of time: seconds, minutes, or hours",
+    reason="Optional reason for the mute"
+)
+@app_commands.autocomplete(unit=duration_unit_autocomplete)
+async def mute(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    duration: int,
+    unit: str = "minutes",
+    reason: str = "No reason provided"
+):
+    if user.bot:
+        await interaction.response.send_message("You Cannot Mute A Bot.", ephemeral=True)
+        return
+
+    if user == interaction.user:
+        await interaction.response.send_message("You Cannot Mute Yourself.", ephemeral=True)
+        return
+
+    if duration <= 0:
+        await interaction.response.send_message("Duration Must Be A Positive Number.", ephemeral=True)
+        return
+
+    if unit not in DURATION_UNITS:
+        await interaction.response.send_message(
+            f"Invalid unit. Choose from: {', '.join(DURATION_UNITS)}", ephemeral=True
+        )
+        return
+
+    unit_map = {"seconds": duration,
+                "minutes": duration * 60, "hours": duration * 3600}
+    unmute_at = time.time() + unit_map[unit]
+
+    add_tts_mute(interaction.guild.id, user.id, unmute_at, reason)
+
+    await interaction.response.send_message(
+        f"Muted {user.mention}'s TTS for {duration} {unit}. Reason: {reason}"
+    )
+    print(
+        f"[MUTE] '{interaction.user}' muted '{user}' TTS for {duration} {unit} "
+        f"in '{interaction.guild.name}'. Reason: {reason}"
+    )
+
+
+@bot.tree.command(name="unmute", description="Unmute A User's TTS Messages")
+@permission_gate()
+@app_commands.describe(user="The user to unmute")
+async def unmute(interaction: discord.Interaction, user: discord.Member):
+    if not is_tts_muted(interaction.guild.id, user.id):
+        await interaction.response.send_message(f"{user.mention} Is Not Muted.", ephemeral=True)
+        return
+
+    remove_tts_mute(interaction.guild.id, user.id)
+
+    await interaction.response.send_message(f"Unmuted {user.mention}'s TTS.")
+    print(
+        f"[UNMUTE] '{interaction.user}' unmuted '{user}' TTS in '{interaction.guild.name}'")
 
 
 @bot.tree.error
