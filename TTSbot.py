@@ -546,6 +546,7 @@ async def tts_worker(guild_id: int):
 async def on_ready():
     global tts_channel_cache, tts_muted_users
     tts_channel_cache = load_tts_channels()
+    tts_muted_users = load_tts_mutes
     await bot.tree.sync()
     print(f"Successfully Logged In As {bot.user}")
 
@@ -553,6 +554,9 @@ async def on_ready():
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
+        return
+
+    if message.author not in voice_clients:
         return
 
     # Ignore All GIF Attachments
@@ -738,7 +742,7 @@ async def language(interaction: discord.Interaction, lang: str):
 
     await interaction.response.send_message(
         f"Language set to `{lang}`.",
-        ephemeral=False
+        ephemeral=True
     )
 
 
